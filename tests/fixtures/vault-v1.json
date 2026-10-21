@@ -1,0 +1,15 @@
+{
+  "format": "cznail-totp-vault",
+  "version": 1,
+  "kdf": {
+    "name": "PBKDF2",
+    "hash": "SHA-256",
+    "iterations": 600000,
+    "salt": "BwcHBwcHBwcHBwcHBwcHBw=="
+  },
+  "cipher": {
+    "name": "AES-GCM",
+    "iv": "CQkJCQkJCQkJCQkJ"
+  },
+  "ciphertext": "GuBgnxRLLeM3LYGHKUMOqPoVK7bkVd8AQcAHdfXIolh4RZN7VzQ4YBYtlKTeDIMCR6Cro3x3HvdFXh6Z8x7SpTrGXa7WphwqUV3rOjXTInhaQTX5B9ez4If/m9bQyQISLdeYPdGQJEaEuX5zzZVoA1cCbrw0NhPzlb3md3m6GUIXgo9rSgfePsiqkhB0sJKA+5Mh3odhXOdGx+dlPSo3WJg3mpnaFHnEI45+lFAoZuoyNKm0WFYnwtFTs7CFCo+/JN4usoLMei6OL6sjidUMDTM0M0Aw2yOrxMYDdQ=="
+}
