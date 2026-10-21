@@ -169,7 +169,7 @@ test('aborted IndexedDB commit preserves existing data and rejects unsaved accou
 
 test('mobile layout, dark theme, offline calculation and pagehide lock', async ({ page, context }) => {
   await page.setViewportSize({ width: 390, height: 844 }); await page.clock.setFixedTime(new Date(59_000));
-  await setup(page); await add(page); await page.getByLabel('切换深色主题').click();
+  await setup(page); await add(page); await page.getByRole('button', { name: '切换到深色主题' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await context.setOffline(true); await page.clock.setFixedTime(new Date(60_000));

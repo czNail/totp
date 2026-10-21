@@ -9,7 +9,12 @@
     "build": "npm run check && vite build",
     "test": "node --test tests/*.test.ts",
     "test:e2e": "playwright test",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "check:site-ui": "node scripts/sync-site-ui.mjs",
+    "sync:site-ui": "node scripts/sync-site-ui.mjs --update",
+    "prepare:site-ui": "node scripts/sync-site-ui.mjs && node scripts/prepare-site-ui.mjs",
+    "prebuild": "npm run prepare:site-ui",
+    "predev": "npm run prepare:site-ui"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",

@@ -7,19 +7,15 @@
     <meta name="referrer" content="no-referrer" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <link rel="icon" type="image/svg+xml" href="/totp/favicon.svg" />
+    <meta name="theme-color" content="" />
+    <!-- site-ui:runtime -->
     <title>TOTP 验证器 · 木匠钉子</title>
   </head>
   <body>
     <a class="skip-link" href="#main">跳到主要内容</a>
-    <header class="site-header">
-      <div class="header-inner wrap">
-        <a class="brand" href="https://cznail.github.io/" aria-label="木匠钉子主页"><span class="brand-mark">n<span>.</span></span><span>木匠钉子</span></a>
-        <nav aria-label="站点导航"><a href="https://cznail.github.io/">返回主页 <span aria-hidden="true">↗</span></a><a href="https://github.com/czNail/totp" target="_blank" rel="noopener noreferrer">源码</a></nav>
-        <button id="theme-toggle" class="icon-button" type="button" aria-label="切换深色主题"></button>
-      </div>
-    </header>
+    <!-- site-ui:header -->
     <main id="main" class="wrap" tabindex="-1"><div id="app"><p class="loading">正在打开本地账号库…</p></div></main>
-    <footer class="site-footer wrap"><span>木匠钉子 <span class="footer-dot">·</span> TOTP 验证器</span><span>本地计算 <span class="footer-dot">/</span> 无需账号</span></footer>
+    <!-- site-ui:footer -->
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <noscript>请开启 JavaScript 以在浏览器本地计算动态验证码。</noscript>
     <script type="module" src="/src/main.ts"></script>

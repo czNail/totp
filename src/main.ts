@@ -552,28 +552,8 @@ document.addEventListener('click', event => {
   }
 });
 
-function setupTheme() {
-  let theme = 'light';
-  try { theme = (localStorage.getItem('neil-homepage:theme') || localStorage.getItem('theme')) === 'dark' ? 'dark' : 'light'; } catch { /* Storage may be disabled. */ }
-  const button = document.querySelector<HTMLButtonElement>('#theme-toggle')!;
-  function apply() {
-    document.documentElement.dataset.theme = theme;
-    button.innerHTML = icon(theme === 'dark' ? 'sun' : 'moon');
-    button.setAttribute('aria-label', theme === 'dark' ? '切换浅色主题' : '切换深色主题');
-  }
-  apply();
-  button.addEventListener('click', () => {
-    theme = theme === 'dark' ? 'light' : 'dark';
-    try { localStorage.setItem('neil-homepage:theme', theme); } catch { /* The current page still changes. */ }
-    apply();
-  });
-  window.addEventListener('storage', event => {
-    if (event.key === 'neil-homepage:theme' && (event.newValue === 'dark' || event.newValue === 'light')) {
-      theme = event.newValue; apply();
-    }
-  });
-}
-setupTheme();
+
+
 async function boot() {
   try {
     if (!window.isSecureContext || !crypto.subtle || !window.indexedDB) throw new Error('需要在 HTTPS 或 localhost 环境中使用，并允许浏览器本地存储。');
