@@ -1,7 +1,9 @@
 import './style.css';
 import { codeAt, MAX_ACCOUNTS, parseInput, prepareKey, remaining, validateParameters, type Account, type Algorithm } from './totp.ts';
-import { createVault, MAX_BACKUP_BYTES, openVault, parseBackup, sealVault, type VaultData } from './vault.ts';
+import { changePin as rewrapPin, createVault, hasPattern, MAX_BACKUP_BYTES, openVault, parseBackup, sealVault, setPattern, type Envelope, type ModernEnvelope, type UnlockMethod, type VaultData } from './vault.ts';
 import { ConflictError, readVault, writeVault, type StoredVault } from './storage.ts';
+import { normalizePattern } from './pattern.ts';
+import { PatternPad } from './pattern-pad.ts';
 
 const paths: Record<string, string> = {
   lock: '<rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><path d="M12 14v3"/>',
@@ -24,11 +26,13 @@ const escape = (value: string) => value.replace(/[&<>"']/g, char => ({ '&': '&am
 const root = document.querySelector<HTMLDivElement>('#app')!;
 const toastNode = document.querySelector<HTMLDivElement>('#toast')!;
 let record: StoredVault | null = null;
-let session: { key: CryptoKey; data: VaultData; keys: Map<string, CryptoKey> } | null = null;
+let session: { key: CryptoKey; data: VaultData; keys: Map<string, CryptoKey>; envelope: ModernEnvelope } | null = null;
 let epoch = 0;
 let busy = false;
 let toastTimer: ReturnType<typeof setTimeout>;
 let dialog: HTMLDialogElement | null = null;
+let dialogCleanup: (() => void) | null = null;
+const pads = new Set<PatternPad>();
 let query = '';
 let tickRunning = false;
 const codes = new Map<string, { counter: number; code: string }>();
@@ -63,8 +67,21 @@ function pinField(id: string, label: string, autocomplete = 'current-password') 
   return `<label for="${id}">${label}</label><input class="pin-input" id="${id}" name="${id}" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="${autocomplete}" required placeholder="输入 6 位数字" />`;
 }
 const errorRegion = '<p class="form-error" role="alert" tabindex="-1"></p>';
+function mountPad(container: HTMLElement, complete: () => void) {
+  const pad = new PatternPad(container, complete);
+  pads.add(pad);
+  return pad;
+}
+function clearPads(scope: HTMLElement) {
+  for (const pad of pads) if (scope.contains(pad.element)) { pad.destroy(); pads.delete(pad); }
+}
+function unlockTabs(method: UnlockMethod) {
+  return `<div class="unlock-tabs" role="group" aria-label="解锁方式"><button type="button" data-method="pattern" aria-pressed="${method === 'pattern'}">手势解锁</button><button type="button" data-method="pin" aria-pressed="${method === 'pin'}">PIN 解锁</button></div>`;
+}
 function closeDialog() {
   if (!dialog) return;
+  dialogCleanup?.(); dialogCleanup = null;
+  clearPads(dialog);
   dialog.querySelectorAll<HTMLInputElement>('input').forEach(input => { input.value = ''; });
   dialog.close();
   dialog.remove();
@@ -110,10 +127,10 @@ async function prepareAccounts(data: VaultData) {
   const entries = await Promise.all(data.accounts.map(async account => [account.id, await prepareKey(account)] as const));
   return new Map(entries);
 }
-async function installSession(data: VaultData, key: CryptoKey, expectedEpoch: number) {
+async function installSession(data: VaultData, key: CryptoKey, expectedEpoch: number, envelope: ModernEnvelope) {
   const keys = await prepareAccounts(data);
   if (epoch !== expectedEpoch) throw new SessionChanged();
-  session = { data, key, keys };
+  session = { data, key, keys, envelope };
   codes.clear();
   query = '';
   closeDialog();
@@ -125,57 +142,75 @@ async function persist(data: VaultData) {
   const expected = record.revision;
   const expectedEpoch = epoch;
   const keys = await prepareAccounts(data);
-  const envelope = await sealVault(data, current.key, record.envelope.kdf);
+  const envelope = await sealVault(data, current.key, current.envelope);
   if (epoch !== expectedEpoch) throw new SessionChanged();
   const next = await writeVault(expected, envelope);
   notify();
   record = next;
   if (epoch !== expectedEpoch) throw new SessionChanged();
-  session = { ...current, data, keys };
+  session = { ...current, data, keys, envelope };
   codes.clear();
   closeDialog();
   render();
 }
 
-function render() {
+async function commitEnvelope(envelope: ModernEnvelope, key: CryptoKey, data: VaultData, expectedEpoch: number, expectedRevision: string | null) {
+  if (epoch !== expectedEpoch) throw new SessionChanged();
+  record = await writeVault(expectedRevision, envelope);
+  notify();
+  await installSession(data, key, expectedEpoch, envelope);
+}
+
+function render(preferred?: UnlockMethod) {
+  clearPads(root);
   if (session) { renderAccounts(); return; }
   const isNew = !record;
-  root.innerHTML = `<section class="gate-layout">
-    <div class="gate-intro"><p class="eyebrow"><span class="tiny-line"></span> 随手可用的小工具</p><h1>TOTP 验证器<span>动态码，留在你手边。</span></h1><p class="intro-copy">把常用账号放在一起。用一个 PIN 解锁，<br class="desktop-break" />随时查看、复制你的动态验证码。</p>
+  const patternAvailable = hasPattern(record?.envelope);
+  const method: UnlockMethod = patternAvailable ? (preferred ?? 'pattern') : 'pin';
+  root.innerHTML = `<section class="gate-layout ${method === 'pattern' ? 'pattern-login' : ''}">
+    <div class="gate-intro"><p class="eyebrow"><span class="tiny-line"></span> 随手可用的小工具</p><h1>TOTP 验证器<span>动态码，留在你手边。</span></h1><p class="intro-copy">把常用账号放在一起。用 PIN 或手势解锁，<br class="desktop-break" />随时查看、复制你的动态验证码。</p>
       <div class="privacy-label">${icon('shield')}<span>本地计算，加密保存在当前浏览器</span></div>
       <div class="locked-preview" aria-hidden="true"><div class="preview-top"><span class="preview-dot"></span><span>YOUR ACCOUNTS</span>${icon('lock')}</div><div class="preview-row"><span class="preview-avatar">G</span><div><b>常用账号</b><span>••• •••</span></div><i></i></div><div class="preview-row"><span class="preview-avatar teal">W</span><div><b>工作账号</b><span>••• •••</span></div><i></i></div><p>${icon('lock')} 解锁后，验证码在这里等你</p></div>
     </div>
-    <section class="gate-card" aria-labelledby="gate-title"><div class="gate-icon">${icon(isNew ? 'shield' : 'lock')}</div><p class="eyebrow">${isNew ? '从这里开始' : '欢迎回来'}</p><h2 id="gate-title">${isNew ? '创建你的本地账号库' : '解锁你的验证码'}</h2><p class="muted gate-description">${isNew ? '设置一个 6 位 PIN，之后每次打开时使用。' : '输入 6 位 PIN，查看已保存的账号。'}</p>
-      <form id="gate-form">${pinField('pin', isNew ? '设置 PIN' : '解锁 PIN', isNew ? 'new-password' : 'current-password')}${isNew ? pinField('pin-confirm', '再次输入 PIN', 'new-password') : ''}${errorRegion}<button type="submit" class="button primary full">${icon(isNew ? 'plus' : 'lock')}${isNew ? '创建账号库' : '解锁'}</button></form>
-      <p class="gate-note">${isNew ? 'PIN 提供基础保护，忘记后无法找回。' : '刷新或关闭页面后，需要重新输入 PIN。'}</p>
-      <div class="gate-divider"><span>${isNew ? '已有加密备份？' : '管理本地数据'}</span></div><button class="text-button" data-action="import">${icon('upload')}从备份恢复</button>${isNew ? '' : '<button class="text-button" data-action="export">导出加密备份</button><details class="forgot"><summary>忘记 PIN？</summary><p>PIN 无法找回。备份仍需要导出时使用的 PIN；你也可以清空本机数据，重新开始。</p><button class="text-button danger-text" data-action="reset">清空本机数据</button></details>'}
+    <section class="gate-card" aria-labelledby="gate-title"><div class="gate-icon">${icon(isNew ? 'shield' : 'lock')}</div><p class="eyebrow">${isNew ? '从这里开始' : '欢迎回来'}</p><h2 id="gate-title">${isNew ? '创建你的本地账号库' : '解锁你的验证码'}</h2><p class="muted gate-description">${isNew ? '先设置 6 位 PIN，解锁后可再启用手势密码。' : method === 'pattern' ? '画出手势密码，松手即可解锁。' : '输入 6 位 PIN，查看已保存的账号。'}</p>
+      ${patternAvailable ? unlockTabs(method) : ''}
+      <form id="gate-form">${method === 'pattern' ? '<div id="gate-pattern"></div><p class="pattern-hint">按住并连接至少 4 个点；也支持数字键选点。</p>' : pinField('pin', isNew ? '设置 PIN' : '解锁 PIN', isNew ? 'new-password' : 'current-password')}${isNew ? pinField('pin-confirm', '再次输入 PIN', 'new-password') : ''}${errorRegion}<button type="submit" class="button primary full">${icon(isNew ? 'plus' : 'lock')}${isNew ? '创建账号库' : '解锁'}</button></form>
+      <p class="gate-note">${isNew ? 'PIN 提供基础保护，忘记后无法找回。' : patternAvailable ? 'PIN 或手势，任意一种通过即可解锁。' : '解锁后可在设置中启用手势密码。'}</p>
+      <div class="gate-divider"><span>${isNew ? '已有加密备份？' : '管理本地数据'}</span></div><button class="text-button" data-action="import">${icon('upload')}从备份恢复</button>${isNew ? '' : '<button class="text-button" data-action="export">导出加密备份</button><details class="forgot"><summary>忘记密码？</summary><p>忘记手势可改用 PIN。备份仍需导出时的 PIN 或手势；两者都忘记时，只能清空本机数据重新开始。</p><button class="text-button danger-text" data-action="reset">清空本机数据</button></details>'}
     </section></section><p class="gate-footnote">无需注册，不上传密钥。清理浏览器数据会删除账号，请保留加密备份。</p>`;
   const form = document.querySelector<HTMLFormElement>('#gate-form')!;
+  const pad = method === 'pattern' ? mountPad(form.querySelector('#gate-pattern')!, () => { if (!busy) form.requestSubmit(); }) : null;
+  root.querySelectorAll<HTMLButtonElement>('[data-method]').forEach(button => button.addEventListener('click', () => {
+    if (!busy) render(button.dataset.method as UnlockMethod);
+  }));
   form.addEventListener('submit', event => {
     event.preventDefault();
+    if (busy) return;
     void action(async () => {
-      const input = form.querySelector<HTMLInputElement>('#pin')!;
-      const pin = input.value;
+      const input = form.querySelector<HTMLInputElement>('#pin');
+      const credential = method === 'pattern' ? normalizePattern(pad!.value) : input!.value;
       const confirm = form.querySelector<HTMLInputElement>('#pin-confirm');
       const confirmation = confirm?.value;
-      input.value = '';
+      if (input) input.value = '';
       if (confirm) confirm.value = '';
-      if (isNew && pin !== confirmation) throw new Error('两次输入的 PIN 不一致，请重新输入。');
-      const expectedEpoch = epoch;
-      const expectedRevision = record?.revision ?? null;
-      if (isNew) {
-        const created = await createVault(pin);
-        if (epoch !== expectedEpoch) throw new SessionChanged();
-        record = await writeVault(null, created.envelope);
-        notify();
-        await installSession({ version: 1, accounts: [] }, created.key, expectedEpoch);
-      } else {
-        const opened = await openVault(pin, record!.envelope);
-        const latest = await readVault();
-        if (latest?.revision !== expectedRevision) throw new ConflictError();
-        await installSession(opened.data, opened.key, expectedEpoch);
-      }
-    }, form);
+      pad?.clear(); pad?.setDisabled(true);
+      try {
+        if (isNew && credential !== confirmation) throw new Error('两次输入的 PIN 不一致，请重新输入。');
+        const expectedEpoch = epoch;
+        const expectedRevision = record?.revision ?? null;
+        if (isNew) {
+          const created = await createVault(credential);
+          await commitEnvelope(created.envelope, created.key, { version: 1, accounts: [] }, expectedEpoch, null);
+        } else {
+          const legacy = record!.envelope.version === 1;
+          const opened = await openVault(credential, record!.envelope, method);
+          const latest = await readVault();
+          if (latest?.revision !== expectedRevision) throw new ConflictError();
+          if (legacy) await commitEnvelope(opened.envelope, opened.key, opened.data, expectedEpoch, expectedRevision);
+          else await installSession(opened.data, opened.key, expectedEpoch, opened.envelope);
+        }
+      } finally { pad?.setDisabled(false); }
+    }, form).finally(() => { if (!session && pad?.element.isConnected) pad.clear(); });
   });
 }
 
@@ -308,49 +343,136 @@ function exportBackup() {
   link.download = `totp-backup-${new Date().toISOString().slice(0, 10)}.json`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast('加密备份已导出，请保留导出时使用的 PIN');
+  toast('加密备份已导出，请保留导出时的 PIN 或手势');
 }
 function backupDialog() {
-  showDialog('备份与恢复', `<p class="muted">备份包含全部账号的加密数据，恢复时需要导出时使用的 PIN。</p><button class="backup-option" data-action="export">${icon('download')}<span><b>导出加密备份</b><small>保存到文件，方便换设备或浏览器</small></span>${icon('arrow')}</button><button class="backup-option" data-action="import">${icon('upload')}<span><b>从备份恢复</b><small>使用文件中的账号替换本机账号库</small></span>${icon('arrow')}</button><p class="small muted backup-note">修改 PIN 后，旧备份仍需要原来的 PIN。</p>`);
+  showDialog('备份与恢复', `<p class="muted">备份包含全部账号及解锁设置，恢复时可使用导出时的 PIN 或手势。</p><button class="backup-option" data-action="export">${icon('download')}<span><b>导出加密备份</b><small>保存到文件，方便换设备或浏览器</small></span>${icon('arrow')}</button><button class="backup-option" data-action="import">${icon('upload')}<span><b>从备份恢复</b><small>使用文件中的账号替换本机账号库</small></span>${icon('arrow')}</button><p class="small muted backup-note">修改 PIN 或手势后，旧备份仍使用原来的密码。</p>`);
 }
 function importDialog() {
   const expected = record?.revision ?? null;
-  const modal = showDialog('从加密备份恢复', `<p class="muted">选择本工具导出的 JSON 文件。恢复后，使用这份备份的 PIN 解锁。</p><form><label for="backup-file">加密备份文件</label><input id="backup-file" type="file" accept=".json,application/json" required />${pinField('backup-pin', '这份备份的 PIN')}${record ? '<label class="checkbox-label"><input type="checkbox" id="replace-confirm" required /><span>我确认用备份替换本机全部账号，现有账号不会合并。建议先导出当前备份。</span></label>' : ''}${errorRegion}<div class="modal-actions"><button type="button" class="button secondary" data-action="close">取消</button><button type="submit" class="button primary">恢复账号库</button></div></form>`);
+  const modal = showDialog('从加密备份恢复', `<p class="muted">选择本工具导出的 JSON 文件。恢复时可使用备份当时的 PIN 或手势；恢复后保留该备份的解锁设置。</p><form><label for="backup-file">加密备份文件</label><input id="backup-file" type="file" accept=".json,application/json" required /><div id="backup-auth"><p class="small muted">请先选择备份文件。</p></div>${record ? '<label class="checkbox-label"><input type="checkbox" id="replace-confirm" required /><span>我确认用备份替换本机全部账号，现有账号不会合并。建议先导出当前备份。</span></label>' : ''}${errorRegion}<div class="modal-actions"><button type="button" class="button secondary" data-action="close">取消</button><button type="submit" class="button primary">恢复账号库</button></div></form>`);
   const form = modal.querySelector<HTMLFormElement>('form')!;
+  const auth = form.querySelector<HTMLElement>('#backup-auth')!;
+  const fileInput = form.querySelector<HTMLInputElement>('#backup-file')!;
+  let backup: Envelope | null = null;
+  let method: UnlockMethod = 'pin';
+  let pad: PatternPad | null = null;
+  let load = 0;
+  dialogCleanup = () => { backup = null; load++; };
+  function renderAuth() {
+    clearPads(auth); pad = null;
+    auth.innerHTML = backup ? `${hasPattern(backup) ? unlockTabs(method) : ''}${method === 'pattern' ? '<p class="pattern-hint">请绘制这份备份的手势密码</p><div id="backup-pattern"></div>' : pinField('backup-pin', '这份备份的 PIN')}` : '<p class="small muted">请先选择有效的备份文件。</p>';
+    if (backup && method === 'pattern') pad = mountPad(auth.querySelector('#backup-pattern')!, () => { if (!busy) form.requestSubmit(); });
+    auth.querySelectorAll<HTMLButtonElement>('[data-method]').forEach(button => button.addEventListener('click', () => {
+      if (!busy) { method = button.dataset.method as UnlockMethod; renderAuth(); form.querySelector('.form-error')?.replaceChildren(); }
+    }));
+  }
+  fileInput.addEventListener('change', () => {
+    if (busy) return;
+    const token = ++load;
+    const file = fileInput.files?.[0];
+    backup = null; renderAuth(); form.querySelector('.form-error')?.replaceChildren();
+    if (!file) return;
+    if (file.size > MAX_BACKUP_BYTES) { report(new Error('备份文件不能大于 2 MB。'), form); return; }
+    void file.text().then(text => {
+      if (token !== load || !modal.isConnected) return;
+      backup = parseBackup(text);
+      method = hasPattern(backup) ? 'pattern' : 'pin';
+      renderAuth();
+    }).catch(error => { if (token === load && modal.isConnected) report(error, form); });
+  });
   form.addEventListener('submit', event => {
     event.preventDefault();
+    if (busy) return;
+    const activePad = pad;
     void action(async () => {
       const expectedEpoch = epoch;
-      const file = form.querySelector<HTMLInputElement>('#backup-file')!.files?.[0];
-      if (!file) throw new Error('请选择加密备份文件。');
-      if (file.size > MAX_BACKUP_BYTES) throw new Error('备份文件不能大于 2 MB。');
-      const pinInput = form.querySelector<HTMLInputElement>('#backup-pin')!;
-      const pin = pinInput.value;
-      pinInput.value = '';
-      const envelope = parseBackup(await file.text());
-      const opened = await openVault(pin, envelope);
-      // Re-encrypt restored copies with a fresh salt/key and IV before local storage.
-      const created = await createVault(pin, opened.data);
-      if (expectedEpoch !== epoch) throw new SessionChanged();
-      record = await writeVault(expected, created.envelope);
-      notify();
-      await installSession(opened.data, created.key, expectedEpoch);
-      toast(`已恢复 ${opened.data.accounts.length} 个账号`);
-    }, form);
+      const source = backup;
+      if (!source) throw new Error('请先选择有效的加密备份文件。');
+      const pinInput = form.querySelector<HTMLInputElement>('#backup-pin');
+      const credential = method === 'pattern' ? normalizePattern(activePad!.value) : pinInput!.value;
+      if (pinInput) pinInput.value = '';
+      activePad?.clear(); activePad?.setDisabled(true); fileInput.disabled = true;
+      try {
+        const opened = await openVault(credential, source, method);
+        // Preserve both wrapped unlock keys; a fresh data IV separates this copy.
+        const envelope = await sealVault(opened.data, opened.key, opened.envelope);
+        await commitEnvelope(envelope, opened.key, opened.data, expectedEpoch, expected);
+        toast(`已恢复 ${opened.data.accounts.length} 个账号`);
+      } finally { activePad?.setDisabled(false); fileInput.disabled = false; }
+    }, form).finally(() => { if (activePad?.element.isConnected) activePad.clear(); });
   });
 }
 function settingsDialog() {
   if (!session) return;
-  showDialog('账号库设置', '<p class="muted">每次刷新或关闭页面后锁定，使用期间保持解锁。</p><button class="backup-option" data-action="change-pin"><span><b>修改解锁 PIN</b><small>重新加密当前浏览器里的账号库</small></span></button><button class="text-button danger-text reset-link" data-action="reset">清空本机数据</button>');
+  const enabled = hasPattern(session.envelope);
+  showDialog('账号库设置', `<p class="muted">每次刷新或关闭页面后锁定，使用期间保持解锁。</p><div class="unlock-setting"><span class="status-pill"><span></span>${enabled ? '手势优先 · PIN 同时可用' : '当前使用 PIN 解锁'}</span><p>${enabled ? '手势或 PIN，任意一种验证通过即可进入。' : '设置手势后，默认优先显示九宫格。'}</p></div><button class="backup-option" data-action="set-pattern"><span><b>${enabled ? '修改手势密码' : '设置手势密码'}</b><small>连接至少 4 个点，连续绘制两次确认</small></span></button>${enabled ? '<button class="text-button" data-action="remove-pattern">关闭手势解锁</button>' : ''}<button class="backup-option" data-action="change-pin"><span><b>修改解锁 PIN</b><small>${enabled ? '更新 PIN，保留已设置的手势' : '更新当前账号库的解锁 PIN'}</small></span></button><button class="text-button danger-text reset-link" data-action="reset">清空本机数据</button>`);
 }
-function changePinDialog() {
+function patternDialog() {
   if (!session || !record) return;
-  const modal = showDialog('修改解锁 PIN', `<p class="muted">新 PIN 只影响当前账号库。请在修改后重新导出备份。</p><form>${pinField('old-pin', '当前 PIN')}${pinField('new-pin', '新 PIN', 'new-password')}${pinField('new-confirm', '再次输入新 PIN', 'new-password')}${errorRegion}<div class="modal-actions"><button type="button" class="button secondary" data-action="close">取消</button><button type="submit" class="button primary">修改 PIN</button></div></form>`);
+  const modal = showDialog(hasPattern(session.envelope) ? '修改手势密码' : '设置手势密码', `<p class="muted">设置后默认优先使用手势，原有 PIN 仍然可以解锁。</p><form><p class="pattern-step" aria-live="polite">绘制新的手势密码</p><div id="setup-pattern"></div><p class="pattern-hint">按住连接至少 4 个不同的点，松手后进入下一步。</p>${errorRegion}<div class="modal-actions split"><button type="button" class="text-button" id="restart-pattern">重新绘制</button><div><button type="button" class="button secondary" data-action="close">取消</button><button type="submit" class="button primary">下一步</button></div></div></form>`);
+  const form = modal.querySelector<HTMLFormElement>('form')!;
+  const step = form.querySelector<HTMLElement>('.pattern-step')!;
+  const hint = form.querySelector<HTMLElement>('.pattern-hint')!;
+  const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+  let first: string | null = null;
+  dialogCleanup = () => { first = null; };
+  const pad = mountPad(form.querySelector('#setup-pattern')!, () => { if (!busy) form.requestSubmit(); });
+  form.querySelector('#restart-pattern')!.addEventListener('click', () => {
+    if (busy) return;
+    first = null; pad.clear(); step.textContent = '绘制新的手势密码'; submit.textContent = '下一步';
+    hint.textContent = '按住连接至少 4 个不同的点，松手后进入下一步。';
+    form.querySelector('.form-error')?.replaceChildren();
+  });
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    if (busy) return;
+    let pattern: string;
+    try { pattern = normalizePattern(pad.value); } catch (error) { pad.clear(); report(error, form); return; }
+    pad.clear(); form.querySelector('.form-error')?.replaceChildren();
+    if (first === null) {
+      first = pattern; step.textContent = '再次绘制相同手势'; submit.textContent = '启用手势';
+      hint.textContent = '再画一次，松手后确认并启用。'; return;
+    }
+    if (first !== pattern) { report(new Error('两次绘制的手势不一致，请重新确认。'), form); return; }
+    pad.setDisabled(true);
+    void action(async () => {
+      if (!session || !record) throw new SessionChanged();
+      const current = session;
+      const expectedEpoch = epoch;
+      const expected = record.revision;
+      const envelope = await setPattern(current.data, current.key, current.envelope, pattern);
+      await commitEnvelope(envelope, current.key, current.data, expectedEpoch, expected);
+      toast('手势密码已启用，PIN 仍可解锁。请重新导出备份');
+    }, form).finally(() => pad.setDisabled(false));
+  });
+}
+function removePatternDialog() {
+  if (!session || !record || !hasPattern(session.envelope)) return;
+  const modal = showDialog('关闭手势解锁？', `<p class="muted">关闭后使用原来的 6 位 PIN 解锁。请确认你仍记得 PIN；旧备份保留导出时的手势设置。</p><form>${errorRegion}<div class="modal-actions"><button type="button" class="button secondary" data-action="close">取消</button><button type="submit" class="button primary">确认关闭</button></div></form>`);
   const form = modal.querySelector<HTMLFormElement>('form')!;
   form.addEventListener('submit', event => {
     event.preventDefault();
     void action(async () => {
       if (!session || !record) throw new SessionChanged();
+      const current = session;
+      const expectedEpoch = epoch;
+      const expected = record.revision;
+      const envelope = await setPattern(current.data, current.key, current.envelope, null);
+      await commitEnvelope(envelope, current.key, current.data, expectedEpoch, expected);
+      toast('手势解锁已关闭，请使用 PIN');
+    }, form);
+  });
+}
+function changePinDialog() {
+  if (!session || !record) return;
+  const modal = showDialog('修改解锁 PIN', `<p class="muted">新 PIN 只影响当前账号库，已设置的手势继续可用。请在修改后重新导出备份。</p><form>${pinField('old-pin', '当前 PIN')}${pinField('new-pin', '新 PIN', 'new-password')}${pinField('new-confirm', '再次输入新 PIN', 'new-password')}${errorRegion}<div class="modal-actions"><button type="button" class="button secondary" data-action="close">取消</button><button type="submit" class="button primary">修改 PIN</button></div></form>`);
+  const form = modal.querySelector<HTMLFormElement>('form')!;
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    void action(async () => {
+      if (!session || !record) throw new SessionChanged();
+      const current = session;
       const expectedEpoch = epoch;
       const expected = record.revision;
       const input = (id: string) => form.querySelector<HTMLInputElement>(`#${id}`)!;
@@ -359,18 +481,15 @@ function changePinDialog() {
       const confirm = input('new-confirm').value;
       form.querySelectorAll('input').forEach(element => { element.value = ''; });
       if (newPin !== confirm) throw new Error('两次输入的新 PIN 不一致。');
-      await openVault(oldPin, record.envelope);
-      if (epoch !== expectedEpoch || !session) throw new SessionChanged();
-      const data = session.data;
-      const created = await createVault(newPin, data);
+      await openVault(oldPin, current.envelope);
       if (epoch !== expectedEpoch) throw new SessionChanged();
-      record = await writeVault(expected, created.envelope);
-      notify();
-      await installSession(data, created.key, expectedEpoch);
-      toast('PIN 已修改，请重新导出备份');
+      const envelope = await rewrapPin(current.data, current.key, current.envelope, newPin);
+      await commitEnvelope(envelope, current.key, current.data, expectedEpoch, expected);
+      toast('PIN 已修改，手势设置保持不变。请重新导出备份');
     }, form);
   });
 }
+
 function resetDialog() {
   if (!record) return;
   const expected = record.revision;
@@ -399,6 +518,8 @@ document.addEventListener('click', event => {
   if (command === 'export') exportBackup();
   if (command === 'import') importDialog();
   if (command === 'settings') settingsDialog();
+  if (command === 'set-pattern') patternDialog();
+  if (command === 'remove-pattern') removePatternDialog();
   if (command === 'change-pin') changePinDialog();
   if (command === 'reset') resetDialog();
   if (command === 'copy') {
