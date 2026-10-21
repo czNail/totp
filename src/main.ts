@@ -4,6 +4,7 @@ import { changePin as rewrapPin, createVault, hasPattern, MAX_BACKUP_BYTES, open
 import { ConflictError, readVault, writeVault, type StoredVault } from './storage.ts';
 import { normalizePattern } from './pattern.ts';
 import { PatternPad } from './pattern-pad.ts';
+import { mountQrImport } from './qr-import.ts';
 
 const paths: Record<string, string> = {
   lock: '<rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><path d="M12 14v3"/>',
@@ -266,7 +267,7 @@ setInterval(() => { void tick(); }, 250);
 function addDialog() {
   if (!session) return;
   if (session.data.accounts.length >= MAX_ACCOUNTS) { toast(`最多支持 ${MAX_ACCOUNTS} 个账号。`); return; }
-  const modal = showDialog('添加账号', `<p class="muted modal-description">粘贴服务提供的验证器密钥，或完整 otpauth 链接。</p><form id="add-form"><label for="source">验证器密钥或 otpauth 链接</label><div class="secret-field"><input id="source" name="source" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="4096" placeholder="例如 JBSWY3DPEHPK3PXP" required /><button class="icon-button" type="button" id="toggle-secret" aria-label="显示密钥" aria-pressed="false">${icon('eye')}</button></div><label for="account-name">账号名称</label><input id="account-name" name="account-name" maxlength="128" placeholder="例如 work@example.com" required /><label for="issuer">服务名称 <span class="optional">选填</span></label><input id="issuer" name="issuer" maxlength="128" placeholder="例如 GitHub" /><details id="advanced"><summary>高级参数</summary><div class="parameters"><div><label for="algorithm">算法</label><select id="algorithm"><option value="SHA1">SHA-1</option><option value="SHA256">SHA-256</option><option value="SHA512">SHA-512</option></select></div><div><label for="digits">位数</label><select id="digits"><option value="6">6 位</option><option value="8">8 位</option></select></div><div><label for="period">周期（秒）</label><input id="period" type="number" min="1" max="300" step="1" value="30" required /></div></div></details>${errorRegion}<div class="modal-actions"><button class="button secondary" type="button" data-action="close">取消</button><button class="button primary" type="submit">添加账号</button></div></form>`);
+  const modal = showDialog('添加账号', `<p class="muted modal-description">粘贴二维码截图、选择图片，或直接输入验证器密钥。</p><form id="add-form"><label for="source">验证器密钥或 otpauth 链接</label><div class="secret-field"><input id="source" name="source" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="4096" placeholder="例如 JBSWY3DPEHPK3PXP" required /><button class="icon-button" type="button" id="toggle-secret" aria-label="显示密钥" aria-pressed="false">${icon('eye')}</button></div><label for="account-name">账号名称</label><input id="account-name" name="account-name" maxlength="128" placeholder="例如 work@example.com" required /><label for="issuer">服务名称 <span class="optional">选填</span></label><input id="issuer" name="issuer" maxlength="128" placeholder="例如 GitHub" /><details id="advanced"><summary>高级参数</summary><div class="parameters"><div><label for="algorithm">算法</label><select id="algorithm"><option value="SHA1">SHA-1</option><option value="SHA256">SHA-256</option><option value="SHA512">SHA-512</option></select></div><div><label for="digits">位数</label><select id="digits"><option value="6">6 位</option><option value="8">8 位</option></select></div><div><label for="period">周期（秒）</label><input id="period" type="number" min="1" max="300" step="1" value="30" required /></div></div></details>${errorRegion}<div class="modal-actions"><button class="button secondary" type="button" data-action="close">取消</button><button class="button primary" type="submit">添加账号</button></div></form>`);
   const form = modal.querySelector<HTMLFormElement>('form')!;
   const field = (id: string) => form.querySelector<HTMLInputElement | HTMLSelectElement>(`#${id}`)!;
   modal.querySelector('#toggle-secret')!.addEventListener('click', event => {
@@ -277,20 +278,30 @@ function addDialog() {
     button.setAttribute('aria-pressed', String(visible));
     button.setAttribute('aria-label', visible ? '隐藏密钥' : '显示密钥');
   });
+  function fillAccount(parsed: ReturnType<typeof parseInput>) {
+    field('account-name').value = parsed.name;
+    field('issuer').value = parsed.issuer;
+    field('algorithm').value = parsed.algorithm;
+    field('digits').value = String(parsed.digits);
+    field('period').value = String(parsed.period);
+    (modal.querySelector('#advanced') as HTMLDetailsElement).open = parsed.algorithm !== 'SHA1' || parsed.digits !== 6 || parsed.period !== 30;
+  }
+  const qr = mountQrImport(modal, form, result => {
+    const source = field('source') as HTMLInputElement;
+    source.value = result.uri; source.type = 'password';
+    const toggle = modal.querySelector<HTMLButtonElement>('#toggle-secret')!;
+    toggle.setAttribute('aria-pressed', 'false'); toggle.setAttribute('aria-label', '显示密钥');
+    fillAccount(result.account); form.querySelector('.form-error')?.replaceChildren();
+  }, () => busy);
+  dialogCleanup = () => qr.dispose();
   field('source').addEventListener('input', () => {
     if (!/^otpauth:/i.test(field('source').value.trim())) return;
-    try {
-      const parsed = parseInput(field('source').value);
-      field('account-name').value = parsed.name;
-      field('issuer').value = parsed.issuer;
-      field('algorithm').value = parsed.algorithm;
-      field('digits').value = String(parsed.digits);
-      field('period').value = String(parsed.period);
-      (modal.querySelector('#advanced') as HTMLDetailsElement).open = parsed.algorithm !== 'SHA1' || parsed.digits !== 6 || parsed.period !== 30;
-    } catch { /* Report full validation on submit so pasting remains uninterrupted. */ }
+    try { fillAccount(parseInput(field('source').value)); }
+    catch { /* Report full validation on submit so pasting remains uninterrupted. */ }
   });
   form.addEventListener('submit', event => {
     event.preventDefault();
+    if (qr.isScanning) return;
     void action(async () => {
       if (!session) throw new SessionChanged();
       const parsed = parseInput(field('source').value);
