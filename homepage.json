@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "name": "TOTP 验证器",
+  "label": "隐私与安全",
+  "description": "在浏览器里管理动态验证码，探索本地加密、备份与简单交互之间的平衡。",
+  "tags": [
+    "TypeScript",
+    "本地加密"
+  ],
+  "icon": "./assets/homepage-icon.svg",
+  "tool": {
+    "url": "https://cznail.github.io/totp/",
+    "subtitle": "TOTP · 本地动态验证码",
+    "features": [
+      "多账号",
+      "PIN 解锁",
+      "本地加密",
+      "加密备份"
+    ],
+    "status": "available"
+  }
+}
