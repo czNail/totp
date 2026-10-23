@@ -5,6 +5,8 @@ import { ConflictError, readVault, writeVault, type StoredVault } from './storag
 import { normalizePattern } from './pattern.ts';
 import { PatternPad } from './pattern-pad.ts';
 import { mountQrImport } from './qr-import.ts';
+import { clearExportReceipt, EXPORT_RECEIPT_KEY, readExportReceipt, recordExport } from './backup-status.ts';
+import { mountOffline } from './offline.ts';
 
 const paths: Record<string, string> = {
   lock: '<rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><path d="M12 14v3"/>',
@@ -37,6 +39,7 @@ const pads = new Set<PatternPad>();
 let query = '';
 let tickRunning = false;
 const codes = new Map<string, { counter: number; code: string }>();
+const waitingCopies = new Map<string, number>();
 const channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('cznail-totp-changes') : null;
 class SessionChanged extends Error {}
 
@@ -105,6 +108,7 @@ function lock(message?: string) {
   epoch++;
   session = null;
   codes.clear();
+  waitingCopies.clear();
   query = '';
   closeDialog();
   render();
@@ -133,6 +137,7 @@ async function installSession(data: VaultData, key: CryptoKey, expectedEpoch: nu
   if (epoch !== expectedEpoch) throw new SessionChanged();
   session = { data, key, keys, envelope };
   codes.clear();
+  waitingCopies.clear();
   query = '';
   closeDialog();
   render();
@@ -151,6 +156,7 @@ async function persist(data: VaultData) {
   if (epoch !== expectedEpoch) throw new SessionChanged();
   session = { ...current, data, keys, envelope };
   codes.clear();
+  waitingCopies.clear();
   closeDialog();
   render();
 }
@@ -220,17 +226,31 @@ function renderAccounts() {
   const count = session.data.accounts.length;
   root.innerHTML = `<section class="vault-heading"><div><p class="eyebrow"><span class="tiny-line"></span>TOTP 验证器</p><h1>我的验证码 <span class="account-total">${count}</span></h1><p class="muted">常用账号，一处查看。</p></div><div class="vault-actions"><button class="button primary" data-action="add">${icon('plus')}添加账号</button><button class="button secondary" data-action="backup">${icon('download')}备份</button><button class="icon-button square" data-action="settings" aria-label="设置" title="设置">${icon('settings')}</button><button class="icon-button square" data-action="lock" aria-label="锁定账号库" title="锁定账号库">${icon('lock')}</button></div></section>
     <div class="vault-status"><span class="status-pill"><span></span>已解锁 · 本地加密</span><span class="time-note">验证码依照设备时间更新</span></div>
+    ${count ? '<aside class="backup-summary" data-backup-summary></aside>' : ''}
     ${count ? `<div class="list-toolbar"><label class="search-box">${icon('search')}<input id="search" type="search" aria-label="搜索账号" placeholder="搜索账号或服务" autocomplete="off" value="${escape(query)}" /></label><span id="result-count" class="muted small"></span></div><div id="account-grid" class="account-grid"></div>` : `<section class="empty-state"><div class="empty-icon">${icon('plus')}</div><h2>添加你的第一个账号</h2><p>粘贴验证器密钥或 otpauth 链接，<br />下一次就能直接在这里找到。</p><button class="button primary" data-action="add">${icon('plus')}添加账号</button><button class="text-button" data-action="import">已有备份？从备份恢复</button></section>`}
     <p class="vault-footnote">${icon('shield')}<span>账号仅保存在当前浏览器。定期导出备份，换设备也能恢复。</span></p>`;
   document.querySelector('#search')?.addEventListener('input', event => { query = (event.target as HTMLInputElement).value; renderGrid(); });
+  renderBackupStatus();
   renderGrid();
 }
+function renderBackupStatus() {
+  const receipt = readExportReceipt();
+  const current = !!record && receipt?.revision === record.revision;
+  const when = receipt ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(receipt.exportedAt) : '';
+  document.querySelectorAll<HTMLElement>('[data-backup-summary]').forEach(node => {
+    node.classList.toggle('needs-backup', !current);
+    node.innerHTML = `<div><strong>${current ? '当前版本已发起备份导出' : receipt ? '账号或解锁设置有变更，建议重新导出' : '尚未记录备份导出'}</strong><p>${receipt ? `上次导出：${escape(when)}。` : '请导出加密文件，便于换设备或恢复。'}${current ? '请确认文件已保存，并保留导出时的 PIN 或手势。' : ''}</p></div><button class="text-button" data-action="export">${current ? '再次导出' : '导出备份'}</button>`;
+  });
+}
+window.addEventListener('storage', event => {
+  if (event.key === EXPORT_RECEIPT_KEY || event.key === null) renderBackupStatus();
+});
 function renderGrid() {
   const grid = document.querySelector('#account-grid');
   if (!grid || !session) return;
   const filtered = session.data.accounts.filter(a => `${a.name} ${a.issuer}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
   document.querySelector('#result-count')!.textContent = `${filtered.length} 个账号`;
-  grid.innerHTML = filtered.length ? filtered.map(account => `<article class="account-card" data-account="${account.id}"><div class="account-top"><span class="account-avatar">${escape(Array.from(account.issuer || account.name)[0].toUpperCase())}</span><div class="account-label"><h2>${escape(account.issuer || account.name)}</h2><p>${escape(account.issuer ? account.name : '动态验证码')}</p></div><button class="icon-button edit-button" data-action="edit" data-id="${account.id}" aria-label="编辑 ${escape(account.name)}" title="编辑账号">${icon('edit')}</button></div><button class="code-button" data-action="copy" data-id="${account.id}" aria-label="复制 ${escape(account.name)} 的验证码"><span class="otp-code" data-code>··· ···</span><span class="copy-glyph">${icon('copy')}</span></button><div class="account-bottom"><span>${account.algorithm.replace('SHA', 'SHA-')} <span class="footer-dot">·</span> ${account.digits} 位</span><span class="countdown" data-countdown></span></div><div class="progress-track"><div data-progress></div></div></article>`).join('') : '<div class="no-results">没有找到匹配的账号，试试其他名称。</div>';
+  grid.innerHTML = filtered.length ? filtered.map(account => `<article class="account-card" data-account="${account.id}"><div class="account-top"><span class="account-avatar">${escape(Array.from(account.issuer || account.name)[0].toUpperCase())}</span><div class="account-label"><h2>${escape(account.issuer || account.name)}</h2><p>${escape(account.issuer ? account.name : '动态验证码')}</p></div><button class="icon-button edit-button" data-action="edit" data-id="${account.id}" aria-label="编辑 ${escape(account.name)}" title="编辑账号">${icon('edit')}</button></div><button class="code-button" data-action="copy" data-id="${account.id}" aria-label="复制 ${escape(account.name)} 的验证码"><span class="otp-code" data-code>··· ···</span><span class="copy-glyph">${icon('copy')}</span></button><div class="account-bottom"><span>${account.algorithm.replace('SHA', 'SHA-')} <span class="footer-dot">·</span> ${account.digits} 位</span><span class="countdown" data-countdown></span></div><div class="copy-timing"><button class="text-button wait-copy" data-action="wait-copy" data-id="${account.id}" data-wait-copy hidden>等更新后再复制</button><span class="sr-only" data-wait-status role="status"></span></div><div class="progress-track"><div data-progress></div></div></article>`).join('') : '<div class="no-results">没有找到匹配的账号，试试其他名称。</div>';
   void tick();
 }
 async function tick() {
@@ -248,6 +268,17 @@ async function tick() {
       card.querySelector('[data-countdown]')!.textContent = `${seconds} 秒后更新`;
       (card.querySelector('[data-progress]') as HTMLElement).style.width = `${seconds / account.period * 100}%`;
       card.classList.toggle('expiring', seconds <= 5);
+      const waitButton = card.querySelector<HTMLButtonElement>('[data-wait-copy]')!;
+      const target = waitingCopies.get(account.id);
+      waitButton.hidden = seconds > 5 && target === undefined;
+      waitButton.disabled = target !== undefined && counter < target;
+      const copyReady = target !== undefined && counter >= target;
+      const waitLabel = copyReady ? '复制新验证码' : target !== undefined ? `等待更新…（${seconds} 秒）` : '等更新后再复制';
+      if (waitButton.textContent !== waitLabel) waitButton.textContent = waitLabel;
+      const waitStatus = card.querySelector<HTMLElement>('[data-wait-status]')!;
+      if (copyReady && !waitStatus.textContent) waitStatus.textContent = '新验证码已就绪，请点击复制。';
+      else if (!copyReady && waitStatus.textContent) waitStatus.textContent = '';
+
       let cached = codes.get(account.id);
       if (!cached || cached.counter !== counter) {
         const code = await codeAt(current.keys.get(account.id)!, account, now);
@@ -345,19 +376,26 @@ function editDialog(id: string) {
     });
   });
 }
-function exportBackup() {
-  if (!record) return;
-  const blob = new Blob([JSON.stringify(record.envelope, null, 2)], { type: 'application/json' });
+async function exportBackup() {
+  // Export the latest stored snapshot, even if another tab changed it.
+  const snapshot = await readVault();
+  if (!snapshot) { await refreshFromStorage(); return; }
+  if (record?.revision !== snapshot.revision) { record = snapshot; lock('账号库已更新，已导出最新版本，请重新解锁。'); }
+  const blob = new Blob([JSON.stringify(snapshot.envelope, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `totp-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast('加密备份已导出，请保留导出时的 PIN 或手势');
+  link.download = `totp-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  try {
+    document.body.append(link); link.click();
+    const recorded = recordExport({ revision: snapshot.revision, exportedAt: Date.now() });
+    renderBackupStatus();
+    toast(recorded ? '已发起加密备份导出，请确认文件已保存' : '已发起导出，但无法记录导出时间。请确认文件已保存');
+  } finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
 }
 function backupDialog() {
-  showDialog('备份与恢复', `<p class="muted">备份包含全部账号及解锁设置，恢复时可使用导出时的 PIN 或手势。</p><button class="backup-option" data-action="export">${icon('download')}<span><b>导出加密备份</b><small>保存到文件，方便换设备或浏览器</small></span>${icon('arrow')}</button><button class="backup-option" data-action="import">${icon('upload')}<span><b>从备份恢复</b><small>使用文件中的账号替换本机账号库</small></span>${icon('arrow')}</button><p class="small muted backup-note">修改 PIN 或手势后，旧备份仍使用原来的密码。</p>`);
+  showDialog('备份与恢复', `<p class="muted">备份包含全部账号及解锁设置，恢复时可使用导出时的 PIN 或手势。</p><div class="backup-summary" data-backup-summary></div><button class="backup-option" data-action="export">${icon('download')}<span><b>导出加密备份</b><small>保存到文件，方便换设备或浏览器</small></span>${icon('arrow')}</button><button class="backup-option" data-action="import">${icon('upload')}<span><b>从备份恢复</b><small>使用文件中的账号替换本机账号库</small></span>${icon('arrow')}</button><p class="small muted backup-note">导出记录不代表文件已妥善保存。修改 PIN 或手势后，旧备份仍使用原来的密码。</p>`);
+  renderBackupStatus();
 }
 function importDialog() {
   const expected = record?.revision ?? null;
@@ -511,6 +549,7 @@ function resetDialog() {
     void action(async () => {
       if (form.querySelector<HTMLInputElement>('#reset-confirm')!.value !== '清空') throw new Error('请输入「清空」两个字。');
       record = await writeVault(expected, null);
+      clearExportReceipt();
       notify();
       lock('本机账号库已清空');
     }, form);
@@ -526,17 +565,28 @@ document.addEventListener('click', event => {
   if (command === 'add') addDialog();
   if (command === 'edit') editDialog(button.dataset.id!);
   if (command === 'backup') backupDialog();
-  if (command === 'export') exportBackup();
+  if (command === 'export') void action(exportBackup);
   if (command === 'import') importDialog();
   if (command === 'settings') settingsDialog();
   if (command === 'set-pattern') patternDialog();
   if (command === 'remove-pattern') removePatternDialog();
   if (command === 'change-pin') changePinDialog();
   if (command === 'reset') resetDialog();
-  if (command === 'copy') {
+  if (command === 'copy' || command === 'wait-copy') {
     const currentEpoch = epoch;
     const account = session?.data.accounts.find(a => a.id === button.dataset.id);
     if (!account || !session) return;
+    if (command === 'wait-copy') {
+      const counter = Math.floor(Date.now() / 1000 / account.period);
+      const target = waitingCopies.get(account.id);
+      if (target === undefined) {
+        waitingCopies.set(account.id, counter + 1);
+        void tick();
+        toast('更新后请点击「复制新验证码」，不会自动改写剪贴板');
+        return;
+      }
+      if (counter < target) return;
+    }
     const key = session.keys.get(account.id)!;
     void action(async () => {
       // Calculate at click time, instead of copying a code cached before a boundary.
@@ -546,8 +596,20 @@ document.addEventListener('click', event => {
         now = Date.now(); code = await codeAt(key, account, now);
       }
       if (epoch !== currentEpoch) throw new SessionChanged();
-      try { await navigator.clipboard.writeText(code); toast('验证码已复制'); }
-      catch { throw new Error('浏览器未允许复制，请选中验证码手动复制。'); }
+      try {
+        await navigator.clipboard.writeText(code);
+        if (epoch !== currentEpoch) throw new SessionChanged();
+        waitingCopies.delete(account.id);
+        const copiedCounter = Math.floor(now / 1000 / account.period);
+        const after = Date.now();
+        if (copiedCounter !== Math.floor(after / 1000 / account.period)) toast('已复制的验证码已更新，请重新复制');
+        else {
+          const seconds = remaining(account.period, after);
+          toast(`已复制 · 约剩 ${seconds} 秒${seconds <= 5 ? '，即将更新' : ''}`);
+        }
+        void tick();
+      }
+      catch (error) { if (error instanceof SessionChanged) throw error; throw new Error('浏览器未允许复制，请选中验证码手动复制。'); }
     });
   }
 });
@@ -564,4 +626,9 @@ async function boot() {
     root.querySelector('#retry')!.addEventListener('click', () => { void boot(); });
   }
 }
+mountOffline(() => {
+  if (busy) { toast('请等待当前操作完成后再更新'); return false; }
+  lock();
+  return true;
+});
 void boot();

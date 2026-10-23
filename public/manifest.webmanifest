@@ -1,0 +1,16 @@
+{
+  "id": "/totp/",
+  "name": "TOTP 验证器 · 木匠钉子",
+  "short_name": "验证码",
+  "description": "本地加密、离线可用的 TOTP 验证器",
+  "lang": "zh-CN",
+  "start_url": "/totp/",
+  "scope": "/totp/",
+  "display": "standalone",
+  "background_color": "#f7f9f8",
+  "theme_color": "#287c82",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
