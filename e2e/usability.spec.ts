@@ -45,7 +45,11 @@ test('cached app reopens offline, keeps the vault locked, and can scan an image 
   await reopened.goto('./');
   await expect(reopened.getByRole('heading', { name: '解锁你的验证码' })).toBeVisible();
   await unlock(reopened);
-  await expect(reopened.locator('#offline-status')).toContainText('离线可用');
+  // Some Chromium versions keep navigator.onLine=true in a newly opened tab
+  // under emulated offline mode. Successful reopening/unlocking and the cache
+  // integrity handshake establish availability, independent of that OS hint.
+  await expect(reopened.locator('#offline-status')).toHaveText(/^(离线资源已就绪|离线可用 · 使用设备时间)$/);
+  await expect(reopened.getByRole('button', { name: '重试离线准备', exact: true })).toBeHidden();
   const qr = await QRCode.toBuffer('otpauth://totp/Test:bob?secret=JBSWY3DPEHPK3PXP&issuer=Test');
   await reopened.getByRole('button', { name: '添加账号', exact: true }).click();
   await reopened.getByLabel('选择二维码图片', { exact: true }).setInputFiles({ name: 'qr.png', mimeType: 'image/png', buffer: qr });
