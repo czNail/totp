@@ -10,14 +10,21 @@
     <link rel="manifest" href="/totp/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/totp/icons/icon-192.png" />
     <meta name="theme-color" content="" />
-    <!-- site-ui:runtime -->
+    <script src="%BASE_URL%site-ui/runtime.js"></script>
     <title>TOTP 验证器 · 木匠钉子</title>
   </head>
   <body>
     <a class="skip-link" href="#main">跳到主要内容</a>
-    <!-- site-ui:header -->
-    <main id="main" class="wrap" tabindex="-1"><div id="app-tools" class="app-tools"></div><div id="app"><p class="loading">正在打开本地账号库…</p></div></main>
-    <!-- site-ui:footer -->
+    <main id="main" class="wrap" tabindex="-1">
+      <div class="app-top">
+        <a class="button secondary home-return" href="/"><span aria-hidden="true">←</span> 返回个人主页</a>
+        <button class="icon-button theme-switch" type="button" data-site-theme aria-label="切换到深色主题" aria-pressed="false">
+          <span aria-hidden="true" class="theme-moon">☾</span><span aria-hidden="true" class="theme-sun">☀</span>
+        </button>
+      </div>
+      <div id="app-tools" class="app-tools"></div>
+      <div id="app"><p class="loading">正在打开本地账号库…</p></div>
+    </main>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <noscript>请开启 JavaScript 以在浏览器本地计算动态验证码。</noscript>
     <script type="module" src="/src/main.ts"></script>
